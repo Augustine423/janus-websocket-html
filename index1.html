@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Janus Multistream Video Player</title>
+    <style>
+        #video-container {
+            width: 1280px;
+            margin: 20px auto;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+        .video-wrapper {
+            width: 620px;
+            height: 480px;
+            position: relative;
+        }
+        .video-wrapper video {
+            width: 100%;
+            height: 100%;
+            background: black;
+        }
+        .video-label {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: white;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 5px;
+        }
+        #status {
+            text-align: center;
+            margin: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div id="status">Initializing...</div>
+    <div id="video-container"></div>
+
+    <script src="https://webrtc.github.io/adapter/adapter-latest.js"></script>
+    <script src="janus.js"></script>
+    <script>
+        // Configuration
+        const server = "ws://13.213.46.108:8188"; // Your Janus WebSocket URL
+        const streamId = 1234; // From multistream-test
+        const secret = "adminpwd"; // From your config
+
+        let janus = null;
+        let streaming = null;
+        let opaqueId = "streamingtest-" + Janus.randomString(12);
+        let remoteStreams = {};
+
+        // DOM elements
+        const status = document.getElementById("status");
+        const videoContainer = document.getElementById("video-container");
+
+        // Initialize Janus
+        Janus.init({
+            debug: "all",
+            callback: function() {
+                if(!Janus.isWebrtcSupported()) {
+                    status.textContent = "WebRTC not supported!";
+                    return;
+                }
+
+                janus = new Janus({
+                    server: server,
+                    success: function() {
+                        janus.attach({
+                            plugin: "janus.plugin.streaming",
+                            opaqueId: opaqueId,
+                            success: function(pluginHandle) {
+                                streaming = pluginHandle;
+                                status.textContent = "Plugin attached, starting stream...";
+                                startStream();
+                            },
+                            error: function(error) {
+                                console.error("Error attaching plugin:", error);
+                                status.textContent = "Error: " + error;
+                            },
+                            onmessage: function(msg, jsep) {
+                                handleMessage(msg, jsep);
+                            },
+                            onremotetrack: function(track, mid, on) {
+                                console.log("Remote track:", track.kind, "mid:", mid, "on:", on);
+                                
+                                if(!remoteStreams[mid]) {
+                                    remoteStreams[mid] = new MediaStream();
+                                    if(track.kind === "video") {
+                                        createVideoElement(mid);
+                                    }
+                                }
+
+                                let stream = remoteStreams[mid];
+                                if(on) {
+                                    stream.addTrack(track);
+                                    if(track.kind === "video") {
+                                        status.textContent = `Video stream ${mid} playing`;
+                                        let videoElement = document.getElementById(`video-${mid}`);
+                                        videoElement.srcObject = stream;
+                                    } else if(track.kind === "audio") {
+                                        status.textContent = "Audio stream active";
+                                        // Audio will play through the first video element
+                                        let firstVideo = Object.values(remoteStreams)[0];
+                                        if(firstVideo && firstVideo !== stream) {
+                                            firstVideo.addTrack(track);
+                                        }
+                                    }
+                                } else {
+                                    stream.removeTrack(track);
+                                    status.textContent = `Track ${track.kind} (mid: ${mid}) removed`;
+                                }
+                            },
+                            oncleanup: function() {
+                                status.textContent = "Stream stopped";
+                                remoteStreams = {};
+                                videoContainer.innerHTML = "";
+                            }
+                        });
+                    },
+                    error: function(error) {
+                        console.error("Janus error:", error);
+                        status.textContent = "Error: " + error;
+                    }
+                });
+            }
+        });
+
+        function createVideoElement(mid) {
+            let wrapper = document.createElement("div");
+            wrapper.className = "video-wrapper";
+
+            let video = document.createElement("video");
+            video.id = `video-${mid}`;
+            video.autoplay = true;
+            video.playsInline = true;
+            video.controls = true;
+
+            let label = document.createElement("div");
+            label.className = "video-label";
+            label.textContent = `Stream ${mid}`;
+
+            wrapper.appendChild(video);
+            wrapper.appendChild(label);
+            videoContainer.appendChild(wrapper);
+        }
+
+        function startStream() {
+            let body = {
+                request: "watch",
+                id: streamId,
+                secret: secret,
+                offer_audio: true,
+                offer_video: true
+            };
+            streaming.send({
+                message: body,
+                success: function() {
+                    console.log("Watch request sent");
+                }
+            });
+        }
+
+        function handleMessage(msg, jsep) {
+            let result = msg["result"];
+            if(result) {
+                if(result["status"]) {
+                    let statusMsg = result["status"];
+                    if(statusMsg === "starting") {
+                        status.textContent = "Stream starting...";
+                    } else if(statusMsg === "started") {
+                        status.textContent = "Stream started";
+                    } else if(statusMsg === "stopped") {
+                        status.textContent = "Stream stopped";
+                    }
+                }
+            } else if(msg["error"]) {
+                console.error("Streaming error:", msg["error"]);
+                status.textContent = "Error: " + msg["error"];
+                return;
+            }
+
+            if(jsep) {
+                streaming.createAnswer({
+                    jsep: jsep,
+                    tracks: [
+                        { type: "audio", recv: true, mid: "a" },
+                        { type: "video", recv: true, mid: "v1" },
+                        { type: "video", recv: true, mid: "v2" },
+                        { type: "video", recv: true, mid: "v3" },
+                        { type: "video", recv: true, mid: "v4" }
+                    ],
+                    success: function(jsep) {
+                        let body = { request: "start" };
+                        streaming.send({
+                            message: body,
+                            jsep: jsep
+                        });
+                    },
+                    error: function(error) {
+                        console.error("Error creating answer:", error);
+                        status.textContent = "Error creating answer";
+                    }
+                });
+            }
+        }
+
+        window.onunload = function() {
+            if(janus) {
+                janus.destroy();
+            }
+        };
+    </script>
+</body>
+</html>

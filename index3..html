@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Janus Multi-Mountpoint Viewer</title>
+    <style>
+        #video-container {
+            width: 1280px;
+            margin: 20px auto;
+        }
+        .mountpoint-section {
+            margin-bottom: 30px;
+        }
+        .mountpoint-title {
+            font-size: 18px;
+            font-weight: bold;
+            margin: 10px 0;
+        }
+        .video-grid {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+        .video-wrapper {
+            width: 620px;
+            height: 480px;
+            position: relative;
+        }
+        .video-wrapper video {
+            width: 100%;
+            height: 100%;
+            background: black;
+        }
+        .video-label {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: white;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 5px;
+        }
+        #status {
+            text-align: center;
+            margin: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div id="status">Initializing...</div>
+    <div id="video-container"></div>
+
+    <script src="https://webrtc.github.io/adapter/adapter-latest.js"></script>
+    <script src="janus.js"></script>
+    <script>
+        // Configuration
+        const server = "ws://13.213.46.108:8188"; // Your Janus WebSocket URL
+        const secret = "adminpwd"; // From your config
+        const mountpoints = [
+            {
+                id: 1,
+                name: "RTP Sample (ID 1)",
+                mids: ["a", "v1", "v2"] // Adjust based on your rtp-sample media config
+            },
+            {
+                id: 1234,
+                name: "Multistream Test (ID 1234)",
+                mids: ["a", "v1", "v2", "v3", "v4"] // From multistream-test
+            }
+        ];
+
+        let janus = null;
+        let streamingHandles = {};
+        let remoteStreams = {};
+
+        // DOM elements
+        const status = document.getElementById("status");
+        const videoContainer = document.getElementById("video-container");
+
+        // Initialize Janus
+        Janus.init({
+            debug: "all",
+            callback: function() {
+                if(!Janus.isWebrtcSupported()) {
+                    status.textContent = "WebRTC not supported!";
+                    return;
+                }
+
+                janus = new Janus({
+                    server: server,
+                    success: function() {
+                        // Create sections for each mountpoint
+                        mountpoints.forEach(mp => {
+                            let section = createMountpointSection(mp);
+                            attachToMountpoint(mp, section);
+                        });
+                    },
+                    error: function(error) {
+                        console.error("Janus error:", error);
+                        status.textContent = "Error: " + error;
+                    }
+                });
+            }
+        });
+
+        function createMountpointSection(mp) {
+            let section = document.createElement("div");
+            section.className = "mountpoint-section";
+            section.id = `section-${mp.id}`;
+
+            let title = document.createElement("div");
+            title.className = "mountpoint-title";
+            title.textContent = mp.name;
+
+            let grid = document.createElement("div");
+            grid.className = "video-grid";
+            grid.id = `grid-${mp.id}`;
+
+            section.appendChild(title);
+            section.appendChild(grid);
+            videoContainer.appendChild(section);
+            return grid;
+        }
+
+        function createVideoElement(mpId, mid) {
+            let grid = document.getElementById(`grid-${mpId}`);
+            let wrapper = document.createElement("div");
+            wrapper.className = "video-wrapper";
+
+            let video = document.createElement("video");
+            video.id = `video-${mpId}-${mid}`;
+            video.autoplay = true;
+            video.playsInline = true;
+            video.controls = true;
+
+            let label = document.createElement("div");
+            label.className = "video-label";
+            label.textContent = `Stream ${mid} (ID ${mpId})`;
+
+            wrapper.appendChild(video);
+            wrapper.appendChild(label);
+            grid.appendChild(wrapper);
+            return video;
+        }
+
+        function attachToMountpoint(mp, grid) {
+            let opaqueId = `streaming-${mp.id}-${Janus.randomString(12)}`;
+            janus.attach({
+                plugin: "janus.plugin.streaming",
+                opaqueId: opaqueId,
+                success: function(pluginHandle) {
+                    streamingHandles[mp.id] = pluginHandle;
+                    status.textContent = `Plugin attached for ${mp.name}, starting stream...`;
+                    startStream(mp);
+                },
+                error: function(error) {
+                    console.error(`Error attaching plugin for ${mp.name}:`, error);
+                    status.textContent = `Error for ${mp.name}: ${error}`;
+                },
+                onmessage: function(msg, jsep) {
+                    handleMessage(mp, msg, jsep);
+                },
+                onremotetrack: function(track, mid, on) {
+                    console.log(`Remote track for ${mp.name}:`, track.kind, "mid:", mid, "on:", on);
+                    let streamKey = `${mp.id}-${mid}`;
+                    
+                    if(!remoteStreams[streamKey]) {
+                        remoteStreams[streamKey] = new MediaStream();
+                        if(track.kind === "video") {
+                            let videoElement = createVideoElement(mp.id, mid);
+                            videoElement.srcObject = remoteStreams[streamKey];
+                        }
+                    }
+
+                    let stream = remoteStreams[streamKey];
+                    if(on) {
+                        stream.addTrack(track);
+                        if(track.kind === "video") {
+                            status.textContent = `Video stream ${mid} playing for ${mp.name}`;
+                        } else if(track.kind === "audio") {
+                            status.textContent = `Audio stream active for ${mp.name}`;
+                            // Add audio to the first video stream of this mountpoint
+                            let firstVideoKey = Object.keys(remoteStreams).find(key => 
+                                key.startsWith(`${mp.id}-`) && key !== streamKey
+                            );
+                            if(firstVideoKey) {
+                                remoteStreams[firstVideoKey].addTrack(track);
+                            }
+                        }
+                    } else {
+                        stream.removeTrack(track);
+                        status.textContent = `Track ${track.kind} (mid: ${mid}) removed for ${mp.name}`;
+                    }
+                },
+                oncleanup: function() {
+                    status.textContent = `Stream stopped for ${mp.name}`;
+                    Object.keys(remoteStreams).forEach(key => {
+                        if(key.startsWith(`${mp.id}-`)) {
+                            delete remoteStreams[key];
+                        }
+                    });
+                    grid.innerHTML = "";
+                }
+            });
+        }
+
+        function startStream(mp) {
+            let body = {
+                request: "watch",
+                id: mp.id,
+                secret: secret,
+                offer_audio: true,
+                offer_video: true
+            };
+            streamingHandles[mp.id].send({
+                message: body,
+                success: function() {
+                    console.log(`Watch request sent for ${mp.name}`);
+                }
+            });
+        }
+
+        function handleMessage(mp, msg, jsep) {
+            let result = msg["result"];
+            if(result) {
+                if(result["status"]) {
+                    let statusMsg = result["status"];
+                    if(statusMsg === "starting") {
+                        status.textContent = `Stream starting for ${mp.name}...`;
+                    } else if(statusMsg === "started") {
+                        status.textContent = `Stream started for ${mp.name}`;
+                    } else if(statusMsg === "stopped") {
+                        status.textContent = `Stream stopped for ${mp.name}`;
+                    }
+                }
+            } else if(msg["error"]) {
+                console.error(`Streaming error for ${mp.name}:`, msg["error"]);
+                status.textContent = `Error for ${mp.name}: ${msg["error"]}`;
+                return;
+            }
+
+            if(jsep) {
+                streamingHandles[mp.id].createAnswer({
+                    jsep: jsep,
+                    tracks: mp.mids.map(mid => ({
+                        type: mid === "a" ? "audio" : "video",
+                        recv: true,
+                        mid: mid
+                    })),
+                    success: function(jsep) {
+                        let body = { request: "start" };
+                        streamingHandles[mp.id].send({
+                            message: body,
+                            jsep: jsep
+                        });
+                    },
+                    error: function(error) {
+                        console.error(`Error creating answer for ${mp.name}:`, error);
+                        status.textContent = `Error creating answer for ${mp.name}`;
+                    }
+                });
+            }
+        }
+
+        window.onunload = function() {
+            if(janus) {
+                janus.destroy();
+            }
+        };
+    </script>
+</body>
+</html>
