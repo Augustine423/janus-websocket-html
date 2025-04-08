@@ -16,93 +16,116 @@
         #status {
             text-align: center;
             margin: 10px;
+            font-family: Arial, sans-serif;
         }
     </style>
 </head>
 <body>
     <div id="status">Initializing...</div>
     <div id="video-container">
-        <video id="remoteVideo" autoplay playsinline controls></video>
+        <video id="remoteVideo" autoplay playsinline controls muted></video>
     </div>
 
+    <!-- Updated WebRTC Adapter from a reliable CDN -->
     <script src="https://webrtc.github.io/adapter/adapter-latest.js"></script>
+    <!-- Janus.js (ensure you have this file locally or use a CDN if available) -->
     <script src="janus.js"></script>
     <script>
         // Configuration
         const server = "ws://13.213.46.108:8188"; // Your Janus WebSocket URL
-        const streamId = 1; // From rtp-sample
-        const secret = "adminpwd"; // From your config
+        const streamId = 1;                       // Stream ID from your setup
+        const secret = "adminpwd";                // Secret from your config
 
         let janus = null;
         let streaming = null;
-        let opaqueId = "streamingtest-" + Janus.randomString(12);
+        let opaqueId = "streamingtest-" + generateRandomString(12);
         let remoteStream = null;
 
         // DOM elements
         const status = document.getElementById("status");
         const remoteVideo = document.getElementById("remoteVideo");
 
+        // Utility to generate random string (replacing Janus.randomString)
+        function generateRandomString(length) {
+            const characters = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+            let result = "";
+            for (let i = 0; i < length; i++) {
+                result += characters.charAt(Math.floor(Math.random() * characters.length));
+            }
+            return result;
+        }
+
         // Initialize Janus
         Janus.init({
-            debug: "all",
+            debug: "all", // Enable full logging
             callback: function() {
-                if(!Janus.isWebrtcSupported()) {
-                    status.textContent = "WebRTC not supported!";
+                if (!Janus.isWebrtcSupported()) {
+                    status.textContent = "WebRTC not supported by this browser!";
+                    console.error("WebRTC not supported");
                     return;
                 }
 
                 janus = new Janus({
                     server: server,
                     success: function() {
-                        janus.attach({
-                            plugin: "janus.plugin.streaming",
-                            opaqueId: opaqueId,
-                            success: function(pluginHandle) {
-                                streaming = pluginHandle;
-                                status.textContent = "Plugin attached, starting stream...";
-                                startStream();
-                            },
-                            error: function(error) {
-                                console.error("Error attaching plugin:", error);
-                                status.textContent = "Error: " + error;
-                            },
-                            onmessage: function(msg, jsep) {
-                                handleMessage(msg, jsep);
-                            },
-                            onremotetrack: function(track, mid, on) {
-                                console.log("Remote track:", track, "mid:", mid, "on:", on);
-                                if(!remoteStream) {
-                                    remoteStream = new MediaStream();
-                                    remoteVideo.srcObject = remoteStream;
-                                }
-                                if(on) {
-                                    remoteStream.addTrack(track);
-                                    if(track.kind === "video") {
-                                        status.textContent = "Video stream playing";
-                                    } else if(track.kind === "audio") {
-                                        status.textContent = "Audio stream active";
-                                    }
-                                } else {
-                                    remoteStream.removeTrack(track);
-                                    status.textContent = "Track removed: " + track.kind;
-                                }
-                            },
-                            oncleanup: function() {
-                                status.textContent = "Stream stopped";
-                                remoteStream = null;
-                            }
-                        });
+                        console.log("Connected to Janus server");
+                        attachToStreamingPlugin();
                     },
                     error: function(error) {
-                        console.error("Janus error:", error);
-                        status.textContent = "Error: " + error;
+                        console.error("Janus connection error:", error);
+                        status.textContent = "Connection error: " + error;
+                    },
+                    destroyed: function() {
+                        status.textContent = "Janus connection destroyed";
                     }
                 });
             }
         });
 
+        // Attach to streaming plugin
+        function attachToStreamingPlugin() {
+            janus.attach({
+                plugin: "janus.plugin.streaming",
+                opaqueId: opaqueId,
+                success: function(pluginHandle) {
+                    streaming = pluginHandle;
+                    console.log("Plugin attached:", streaming.getPlugin());
+                    status.textContent = "Plugin attached, requesting stream...";
+                    startStream();
+                },
+                error: function(error) {
+                    console.error("Error attaching plugin:", error);
+                    status.textContent = "Plugin error: " + error;
+                },
+                onmessage: function(msg, jsep) {
+                    handleMessage(msg, jsep);
+                },
+                onremotetrack: function(track, mid, on) {
+                    console.log("Remote track received:", track.kind, "mid:", mid, "on:", on);
+                    if (!remoteStream) {
+                        remoteStream = new MediaStream();
+                        remoteVideo.srcObject = remoteStream;
+                    }
+                    if (on) {
+                        remoteStream.addTrack(track);
+                        status.textContent = track.kind === "video" ? "Video streaming" : "Audio streaming";
+                    } else {
+                        remoteStream.removeTrack(track);
+                        status.textContent = "Track removed: " + track.kind;
+                    }
+                },
+                oncleanup: function() {
+                    console.log("Stream cleanup");
+                    status.textContent = "Stream stopped";
+                    remoteStream = null;
+                    remoteVideo.srcObject = null;
+                }
+            });
+        }
+
+        // Request the stream
         function startStream() {
-            let body = {
+            const watchRequest = {
                 request: "watch",
                 id: streamId,
                 secret: secret,
@@ -110,57 +133,65 @@
                 offer_video: true
             };
             streaming.send({
-                message: body,
+                message: watchRequest,
                 success: function() {
-                    console.log("Watch request sent");
+                    console.log("Watch request sent successfully");
+                },
+                error: function(error) {
+                    console.error("Watch request failed:", error);
+                    status.textContent = "Watch request failed: " + error;
                 }
             });
         }
 
+        // Handle incoming messages and JSEP
         function handleMessage(msg, jsep) {
-            let result = msg["result"];
-            if(result) {
-                if(result["status"]) {
-                    let statusMsg = result["status"];
-                    if(statusMsg === "starting") {
-                        status.textContent = "Stream starting...";
-                    } else if(statusMsg === "started") {
-                        status.textContent = "Stream started";
-                    } else if(statusMsg === "stopped") {
-                        status.textContent = "Stream stopped";
-                    }
+            console.log("Received message:", msg);
+            const result = msg["result"];
+            if (result) {
+                if (result["status"]) {
+                    const statusMsg = result["status"];
+                    status.textContent = "Stream status: " + statusMsg;
+                    console.log("Stream status:", statusMsg);
                 }
-            } else if(msg["error"]) {
+            } else if (msg["error"]) {
                 console.error("Streaming error:", msg["error"]);
                 status.textContent = "Error: " + msg["error"];
                 return;
             }
 
-            if(jsep) {
+            if (jsep) {
+                console.log("Handling JSEP:", jsep);
                 streaming.createAnswer({
                     jsep: jsep,
                     tracks: [
                         { type: "audio", recv: true },
                         { type: "video", recv: true }
                     ],
-                    success: function(jsep) {
-                        let body = { request: "start" };
+                    success: function(answerJsep) {
+                        console.log("Answer created:", answerJsep);
+                        const startRequest = { request: "start" };
                         streaming.send({
-                            message: body,
-                            jsep: jsep
+                            message: startRequest,
+                            jsep: answerJsep,
+                            success: function() {
+                                console.log("Stream started");
+                            }
                         });
                     },
                     error: function(error) {
                         console.error("Error creating answer:", error);
-                        status.textContent = "Error creating answer";
+                        status.textContent = "Answer creation error: " + error;
                     }
                 });
             }
         }
 
+        // Cleanup on page unload
         window.onunload = function() {
-            if(janus) {
+            if (janus) {
                 janus.destroy();
+                console.log("Janus instance destroyed");
             }
         };
     </script>
